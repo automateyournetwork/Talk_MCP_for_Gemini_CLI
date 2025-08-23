@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
 MCP Server: Talk mode (PyAudio + Whisper) with tools:
-  - talk_start(blocking?, device_index?, energy_gate?, end_sil_ms?, max_utter_ms?, ..., send_to_gemini?)
+  - talk_start(blocking?, device_index?, energy_gate?, end_sil_ms?, max_utter_ms?, ...)
   - talk_status()
   - talk_stop()
   - list_devices()
+  - tts_speak(text, voice?, model?, fmt?)
 
-Pure MCP (stdio). No Gemini HTTP/CLI calls except when send_to_gemini=true.
+Pure MCP (stdio). No playback. No Gemini calls here.
+- talk_start: record → transcribe → return transcript only
+- tts_speak: text → audio file (absolute path returned)
 """
 
 import os, sys, time, wave, math, queue, shutil, tempfile, subprocess, logging, threading
 from pathlib import Path
-from typing import Optional, Dict, Any, List
-import shlex
+from typing import Optional, Dict, Any, List, Tuple
 import pyaudio
 
 # MCP server (FastMCP wrapper)
@@ -46,8 +48,11 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 LANG          = os.getenv("TALK_LANG", "")
 TMP_DIR       = os.getenv("TALK_TMP", "")  # optional
 
-GEMINI_BIN    = os.getenv("GEMINI_BIN", "gemini")     # for send_to_gemini=true
 DEBUG_ENERGY  = os.getenv("TALK_DEBUG_ENERGY", "0") == "1"
+
+# ---------- TTS defaults ----------
+TTS_MODEL  = os.getenv("TTS_MODEL", "gpt-4o-mini-tts")
+TTS_VOICE  = os.getenv("TTS_VOICE", "alloy")
 
 # ---------- helpers ----------
 def _rms_energy(pcm: bytes) -> float:
@@ -95,60 +100,36 @@ def _transcribe(wav: Path) -> str:
 def _ms() -> int:
     return int(round(time.time() * 1000))
 
-def _run_gemini_cli_verbose(prompt_text: str) -> Dict[str, Any]:
+# ---------- OpenAI TTS ----------
+def _tts_openai(text: str, out_path: Path, model: str, voice: str) -> tuple[bool, str]:
     """
-    Call Gemini CLI with the transcript. Supports 3 modes:
-      1. GEMINI_USE_STDIN=1   → echo text into stdin of gemini
-      2. GEMINI_ARGS template → args with {text} placeholder
-      3. Default              → gemini --prompt "<text>"
-    Returns: {"ok": bool, "stdout": str, "stderr": str,
-              "returncode": int, "cmd": str}
+    Synthesize speech with OpenAI TTS → write to out_path.
+    Requires OPENAI_API_KEY and `pip install openai>=1.0`.
+    Returns (ok, error_message).
     """
-    bin_path = shutil.which(GEMINI_BIN) or GEMINI_BIN
+    try:
+        from openai import OpenAI
+    except Exception as e:
+        log.error("OpenAI SDK not installed: %s", e)
+        return False, f"import_error: {e}"
 
-    def result(ok, stdout, stderr, rc, cmd_list):
-        return {
-            "ok": ok,
-            "stdout": (stdout or "").strip(),
-            "stderr": (stderr or "").strip(),
-            "returncode": rc,
-            "cmd": " ".join(shlex.quote(c) for c in cmd_list),
-        }
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return False, "missing OPENAI_API_KEY in this process"
 
     try:
-        # Mode 1: send transcript via stdin
-        if os.getenv("GEMINI_USE_STDIN", "0") == "1":
-            cmd = [bin_path]
-            p = subprocess.run(
-                cmd,
-                input=prompt_text,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            return result(p.returncode == 0, p.stdout, p.stderr, p.returncode, cmd)
-
-        # Mode 2: args template
-        args_tpl = os.getenv("GEMINI_ARGS", "").strip()
-        if args_tpl:
-            filled = args_tpl.replace("{text}", prompt_text)
-            cmd = [bin_path, *shlex.split(filled)]
-            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            return result(p.returncode == 0, p.stdout, p.stderr, p.returncode, cmd)
-
-        # Mode 3: default
-        cmd = [bin_path, "--prompt", prompt_text]
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        return result(p.returncode == 0, p.stdout, p.stderr, p.returncode, cmd)
-
+        client = OpenAI(api_key=api_key)
+        # No 'format' arg; rely on SDK default container (mp3) and stream to file
+        with client.audio.speech.with_streaming_response.create(
+            model=model,
+            voice=voice,
+            input=text,
+        ) as resp:
+            resp.stream_to_file(str(out_path))
+        return True, ""
     except Exception as e:
-        return {
-            "ok": False,
-            "stdout": "",
-            "stderr": f"{type(e).__name__}: {e}",
-            "returncode": -1,
-            "cmd": bin_path,
-        }
+        log.error("TTS error: %s", e)
+        return False, f"{type(e).__name__}: {e}"
 
 # ---------- engine ----------
 class TalkEngine:
@@ -166,7 +147,7 @@ class TalkEngine:
 
         self.tmp_base: Optional[Path] = None
         self.last_transcript: str = ""
-        self.last_reply: str = ""
+        self.last_reply: str = ""   # kept for backward compat; unused in STT-only mode
         self.error: Optional[str] = None
 
     def start(self,
@@ -216,7 +197,7 @@ class TalkEngine:
             "running": self.running,
             "params": self._params(),
             "transcript": self.last_transcript,
-            "reply": self.last_reply,
+            "reply": self.last_reply,  # always "" in STT-only mode
             "error": self.error,
         }
         return out
@@ -394,7 +375,8 @@ def talk_start(
     blocking: bool = True,
 ) -> Dict[str, Any]:
     """
-    Capture one utterance with VAD, send transcript to Gemini CLI, and return both.
+    Capture one utterance with VAD and return the transcript only.
+    No Gemini or TTS here — the agent will handle reply + audio.
     """
     out = _engine.start(
         rate, channels, chunk, energy_gate, min_talk_ms, end_sil_ms,
@@ -410,20 +392,15 @@ def talk_start(
                 out.update(st)
                 break
 
+    # STT-only result
     transcript = out.get("transcript") or _engine.last_transcript
-    if transcript:
-        g = _run_gemini_cli_verbose(transcript)
-        _engine.last_reply = g.get("stdout", "").strip()
-        out["reply"] = _engine.last_reply
-        out["gemini"] = g
-
-    # Always give a nice unified output
-    out["output"] = out.get("reply") or transcript or ""
+    out["reply"] = ""                 # leave empty; Gemini will reply
+    out["output"] = transcript or ""  # convenience field
     return out
 
 @mcp.tool()
 def talk_status() -> Dict[str, Any]:
-    """Return current state, parameters, last transcript, last reply, and error (if any)."""
+    """Return current state, parameters, last transcript, last reply (unused), and error (if any)."""
     return _engine.status()
 
 @mcp.tool()
@@ -435,6 +412,34 @@ def talk_stop() -> Dict[str, Any]:
 def list_devices() -> Dict[str, Any]:
     """List available input devices with indices."""
     return _engine.list_devices()
+
+# -------- standalone TTS tool (no playback) --------
+@mcp.tool()
+def tts_speak(
+    text: str,
+    voice: Optional[str] = None,
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Text → speech using OpenAI TTS. No playback.
+    Returns { ok, path (absolute), error }.
+    """
+    if not text or not text.strip():
+        return {"ok": False, "path": "", "error": "empty text"}
+
+    v = voice or TTS_VOICE
+    m = model or TTS_MODEL
+
+    base = Path(TMP_DIR) if TMP_DIR else Path(tempfile.mkdtemp(prefix="talk_"))
+    base.mkdir(parents=True, exist_ok=True)
+    out_path = base / f"tts_{_ms()}.mp3"   # fixed container
+
+    ok, err = _tts_openai(text, out_path, model=m, voice=v)
+    return {
+        "ok": bool(ok),
+        "path": str(out_path.resolve()) if ok else "",
+        "error": err,
+    }
 
 if __name__ == "__main__":
     log.info("Starting Talk MCP (stdio)…")
