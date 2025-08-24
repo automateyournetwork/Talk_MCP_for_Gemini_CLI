@@ -16,7 +16,8 @@ import os, sys, time, wave, math, queue, shutil, tempfile, subprocess, logging, 
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 import pyaudio
-
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 # MCP server (FastMCP wrapper)
 try:
     from mcp.server.fastmcp import FastMCP
@@ -29,7 +30,18 @@ logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     stream=sys.stderr
 )
+LOG_PATH = os.getenv("TALK_LOG", "/tmp/talk_mcp.log")
+fh = logging.FileHandler(LOG_PATH)
+fh.setFormatter(logging.Formatter("%(asctime)s | %(name)s | %(levelname)s | %(message)s"))
+fh.setLevel(logging.DEBUG)
+logging.getLogger().addHandler(fh)
+
+# Make DEBUG really verbose when TALK_DEBUG_ENERGY=1
+if os.getenv("TALK_DEBUG_ENERGY", "0") == "1":
+    logging.getLogger().setLevel(logging.DEBUG)
+
 log = logging.getLogger("TalkMCP")
+log.info(f"Talk MCP booting; log file at {LOG_PATH}")
 
 # ---------- defaults (env-overridable) ----------
 DEF_RATE         = int(os.getenv("TALK_RATE", "16000"))
@@ -270,6 +282,7 @@ class TalkEngine:
 
     def _run_once(self) -> None:
         try:
+            log.info(f"Preparing input: rate={self.rate} ch={self.channels} chunk={self.chunk} device_index={self.device_index}")
             pa = pyaudio.PyAudio()
             kwargs = dict(format=pyaudio.paInt16, channels=self.channels,
                           rate=self.rate, input=True, frames_per_buffer=self.chunk)
@@ -281,6 +294,7 @@ class TalkEngine:
             if self.device_index is not None:
                 kwargs["input_device_index"] = int(self.device_index)
             stream = pa.open(**kwargs)
+            log.info(f"Opened input stream OK at rate={self.rate}Hz on device_index={self.device_index}")
 
             speaking = False
             started_at = 0

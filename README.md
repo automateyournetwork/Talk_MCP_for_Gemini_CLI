@@ -21,3 +21,14 @@ As you see you need to setup a virtual environment and install the requirements.
 fastmcp         2.11.3
 openai-whisper  20250625
 PyAudio         0.2.14
+
+### MacOS 
+Add 
+brew install portaudio
+brew install ffmpeg
+Make sure your open-ai whisper is using the venv not the global whisper install
+
+#### tailf 
+tail -f /tmp/talk_mcp.log
+
+This will show you wtf is going on with the MCP while it works :D 
