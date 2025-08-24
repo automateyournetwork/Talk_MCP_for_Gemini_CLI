@@ -26,7 +26,9 @@ PyAudio         0.2.14
 Add 
 brew install portaudio
 brew install ffmpeg
-Make sure your open-ai whisper is using the venv not the global whisper install
+python3 -m pip install -r requirements.txt
+
+** Make sure your open-ai whisper is using the venv not the global whisper install **
 
 #### tailf 
 tail -f /tmp/talk_mcp.log
