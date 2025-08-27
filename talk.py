@@ -66,6 +66,18 @@ DEBUG_ENERGY  = os.getenv("TALK_DEBUG_ENERGY", "0") == "1"
 TTS_MODEL  = os.getenv("TTS_MODEL", "gpt-4o-mini-tts")
 TTS_VOICE  = os.getenv("TTS_VOICE", "alloy")
 
+# ---------- language support (short list for Whisper + OpenAI TTS) ----------
+SUPPORTED_LANGS = {
+    "en", "es", "fr", "de", "it", "pt", "ru", "ar", "hi", "ja", "ko", "zh"
+}
+# Common aliases you might want to accept and map
+LANG_ALIASES = {
+    "cn": "zh",
+    "zh-cn": "zh", "zh_simplified": "zh", "zh-hans": "zh",
+    "zh-tw": "zh", "zh_hant": "zh", "zh-hant": "zh",
+    "jp": "ja",
+}
+
 # ---------- helpers ----------
 def _rms_energy(pcm: bytes) -> float:
     import struct
@@ -85,9 +97,10 @@ def _write_wav(path: Path, frames: List[bytes], rate: int, channels: int) -> Non
 def _have_whisper_cli() -> bool:
     return shutil.which(WHISPER_BIN) is not None
 
-def _transcribe_cli(wav: Path) -> str:
+def _transcribe_cli(wav: Path, language: str) -> str:
     cmd = [WHISPER_BIN, str(wav), "--model", WHISPER_MODEL, "--fp16", "False", "--output_format", "txt"]
-    if LANG: cmd += ["--language", LANG]
+    if language:
+        cmd += ["--language", language]
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         txt = Path(str(wav) + ".txt")
@@ -96,21 +109,36 @@ def _transcribe_cli(wav: Path) -> str:
         log.error("whisper CLI failed: %s", e)
         return ""
 
-def _transcribe_py(wav: Path) -> str:
+def _transcribe_py(wav: Path, language: str) -> str:
     try:
         import whisper  # pip install -U openai-whisper
         model = whisper.load_model(WHISPER_MODEL)
-        res = model.transcribe(str(wav), language=LANG or None, fp16=False)
+        lang_arg = language or None  # None => auto-detect
+        res = model.transcribe(str(wav), language=lang_arg, fp16=False)
         return (res.get("text") or "").strip()
     except Exception as e:
         log.error("whisper (py) failed: %s", e)
         return ""
 
-def _transcribe(wav: Path) -> str:
-    return _transcribe_cli(wav) if _have_whisper_cli() else _transcribe_py(wav)
+def _transcribe(wav: Path, language: str) -> str:
+    return _transcribe_cli(wav, language) if _have_whisper_cli() else _transcribe_py(wav, language)
 
 def _ms() -> int:
     return int(round(time.time() * 1000))
+
+
+def normalize_language(lang: Optional[str]) -> str:
+    """
+    Returns a normalized 2-letter code from SUPPORTED_LANGS, or "" for auto.
+    Accepts common aliases. Any unsupported value falls back to "" (auto).
+    """
+    if not lang:
+        return ""
+    l = str(lang).strip().lower()
+    if l in ("auto", "detect", "default", "none"):
+        return ""
+    l = LANG_ALIASES.get(l, l)
+    return l if l in SUPPORTED_LANGS else ""
 
 # ---------- OpenAI TTS ----------
 def _tts_openai(text: str, out_path: Path, model: str, voice: str) -> tuple[bool, str]:
@@ -156,6 +184,7 @@ class TalkEngine:
         self.min_talk_ms, self.end_sil_ms = DEF_MIN_TALK_MS, DEF_END_SIL_MS
         self.max_utter_ms, self.pre_roll_ms = DEF_MAX_UTTER_MS, DEF_PRE_ROLL_MS
         self.device_index = int(DEF_DEVICE_INDEX) if DEF_DEVICE_INDEX not in (None, "") else None
+        self.language = normalize_language(os.getenv("TALK_LANG", ""))
 
         self.tmp_base: Optional[Path] = None
         self.last_transcript: str = ""
@@ -339,7 +368,7 @@ class TalkEngine:
                         if dur >= self.min_talk_ms and frames:
                             wav = (self.tmp_base / f"utt_{started_at}.wav")
                             _write_wav(wav, frames, self.rate, self.channels)
-                            text = _transcribe(wav)
+                            text = _transcribe(wav, self.language)
                             with self._lock:
                                 self.last_transcript = text
                         break
@@ -349,7 +378,7 @@ class TalkEngine:
                     if frames:
                         wav = (self.tmp_base / f"utt_{started_at}.wav")
                         _write_wav(wav, frames, self.rate, self.channels)
-                        text = _transcribe(wav)
+                        text = _transcribe(wav, self.language)
                         with self._lock:
                             self.last_transcript = text
                     break
@@ -387,17 +416,24 @@ def talk_start(
     pre_roll_ms: Optional[int] = None,
     device_index: Optional[int] = None,
     blocking: bool = True,
+    language: Optional[str] = None,   # 👈 NEW
 ) -> Dict[str, Any]:
     """
     Capture one utterance with VAD and return the transcript only.
     No Gemini or TTS here — the agent will handle reply + audio.
     """
+    # Normalize and set per-call language ("" => auto)
+    lang_norm = normalize_language(language)
+    if language and not lang_norm and language.lower() not in ("auto", "detect", "default", "none"):
+        # Provided but unsupported: fall back to auto (no hard fail)
+        log.warning(f"Unsupported language '{language}', falling back to auto-detect.")
+    _engine.language = lang_norm
+
     out = _engine.start(
         rate, channels, chunk, energy_gate, min_talk_ms, end_sil_ms,
         max_utter_ms, pre_roll_ms, device_index, blocking
     )
 
-    # If non-blocking, poll until finished
     if not blocking and out.get("running"):
         for _ in range(30):
             time.sleep(0.3)
@@ -406,11 +442,13 @@ def talk_start(
                 out.update(st)
                 break
 
-    # STT-only result
     transcript = out.get("transcript") or _engine.last_transcript
-    out["reply"] = ""                 # leave empty; Gemini will reply
-    out["output"] = transcript or ""  # convenience field
+    out["reply"] = ""
+    out["output"] = transcript or ""
+    # Include the resolved language in response metadata for debugging/telemetry
+    out.setdefault("params", {}).update({"language": _engine.language or "auto"})
     return out
+
 
 @mcp.tool()
 def talk_status() -> Dict[str, Any]:
