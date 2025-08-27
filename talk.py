@@ -76,6 +76,8 @@ LANG_ALIASES = {
     "zh-cn": "zh", "zh_simplified": "zh", "zh-hans": "zh",
     "zh-tw": "zh", "zh_hant": "zh", "zh-hant": "zh",
     "jp": "ja",
+    "yue": "zh",   # 👈 NEW Cantonese alias
+    "cantonese": "zh"  # 👈 Optional extra
 }
 
 # ---------- helpers ----------
