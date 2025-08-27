@@ -80,6 +80,22 @@ LANG_ALIASES = {
     "cantonese": "zh"  # 👈 Optional extra
 }
 
+# ---------- TTS voices ----------
+# Full set of OpenAI TTS voices
+TTS_VOICES = {
+    "alloy":   {"name": "Alloy",   "style": "neutral, clear"},
+    "ash":     {"name": "Ash",     "style": "soft, natural"},
+    "ballad":  {"name": "Ballad",  "style": "lyrical, smooth"},
+    "coral":   {"name": "Coral",   "style": "bright, upbeat"},
+    "echo":    {"name": "Echo",    "style": "resonant, deep"},
+    "fable":   {"name": "Fable",   "style": "storyteller, expressive"},
+    "nova":    {"name": "Nova",    "style": "dynamic, lively"},
+    "onyx":    {"name": "Onyx",    "style": "strong, authoritative"},
+    "sage":    {"name": "Sage",    "style": "calm, thoughtful"},
+    "shimmer": {"name": "Shimmer", "style": "crisp, energetic"},
+}
+TTS_DEFAULT_VOICE = os.getenv("TTS_VOICE", "alloy")
+
 # ---------- helpers ----------
 def _rms_energy(pcm: bytes) -> float:
     import struct
@@ -141,6 +157,12 @@ def normalize_language(lang: Optional[str]) -> str:
         return ""
     l = LANG_ALIASES.get(l, l)
     return l if l in SUPPORTED_LANGS else ""
+
+def _normalize_voice(v: Optional[str]) -> str:
+    if not v:
+        return TTS_DEFAULT_VOICE
+    v = str(v).strip().lower()
+    return v if v in TTS_VOICES else TTS_DEFAULT_VOICE
 
 # ---------- OpenAI TTS ----------
 def _tts_openai(text: str, out_path: Path, model: str, voice: str) -> tuple[bool, str]:
@@ -493,6 +515,19 @@ def tts_speak(
         "ok": bool(ok),
         "path": str(out_path.resolve()) if ok else "",
         "error": err,
+    }
+
+@mcp.tool()
+def list_voices() -> Dict[str, Any]:
+    """
+    List available TTS voices and the default.
+    """
+    return {
+        "default": _normalize_voice(TTS_DEFAULT_VOICE),
+        "voices": [
+            {"code": code, "label": meta["name"], "style": meta["style"]}
+            for code, meta in TTS_VOICES.items()
+        ],
     }
 
 if __name__ == "__main__":
