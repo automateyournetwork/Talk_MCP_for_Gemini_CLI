@@ -123,12 +123,12 @@ def _transcribe_cli(wav: Path, language: str) -> str:
     "--output_format", "txt",
     "--output_dir", str(wav.parent)   # 👈 force same dir as .wav
     ]
-    
+
     if language:
         cmd += ["--language", language]
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        txt = Path(str(wav) + ".txt")
+        txt = Path(str(wav)[:-4] + ".txt"
         return txt.read_text(encoding="utf-8").strip() if txt.exists() else ""
     except subprocess.CalledProcessError as e:
         log.error("whisper CLI failed: %s", e)
