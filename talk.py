@@ -116,7 +116,14 @@ def _have_whisper_cli() -> bool:
     return shutil.which(WHISPER_BIN) is not None
 
 def _transcribe_cli(wav: Path, language: str) -> str:
-    cmd = [WHISPER_BIN, str(wav), "--model", WHISPER_MODEL, "--fp16", "False", "--output_format", "txt"]
+    cmd = [
+    WHISPER_BIN, str(wav),
+    "--model", WHISPER_MODEL,
+    "--fp16", "False",
+    "--output_format", "txt",
+    "--output_dir", str(wav.parent)   # 👈 force same dir as .wav
+    ]
+    
     if language:
         cmd += ["--language", language]
     try:
